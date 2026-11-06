@@ -1,0 +1,295 @@
+name: Build R36S EmulationStation fonts
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Check out dArkOSen source
+        uses: actions/checkout@v4
+        with:
+          repository: Jason3x/EmulationStation-fcamod-dArkOS-EN
+          ref: cc4de730a4fc0dd47b5d1ebe445e9618ee01b466
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Apply Quick Search and notification font patch
+        shell: bash
+        run: |
+          cat > "$RUNNER_TEMP/fonts.patch" <<'FONT_PATCH'
+          diff --git a/es-app/src/views/SystemView.cpp b/es-app/src/views/SystemView.cpp
+          index 4cc714d..ab65b15 100644
+          --- a/es-app/src/views/SystemView.cpp
+          +++ b/es-app/src/views/SystemView.cpp
+          @@ -353,7 +353,7 @@ void SystemView::showQuickSearch()
+           		};
+           
+           		//if (Settings::getInstance()->getBool("UseOSK"))
+          -			mWindow->pushGui(new GuiTextEditPopupKeyboard(mWindow, _("QUICK SEARCH"), "", updateVal, false));
+          +			mWindow->pushGui(new GuiTextEditPopupKeyboard(mWindow, _("QUICK SEARCH"), "", updateVal, false, "OK", true));
+           		//else
+           			//mWindow->pushGui(new GuiTextEditPopup(mWindow, _("QUICK SEARCH"), "", updateVal, false));
+           	}
+          diff --git a/es-core/src/ThemeData.cpp b/es-core/src/ThemeData.cpp
+          index f1f1145..ac1688c 100644
+          --- a/es-core/src/ThemeData.cpp
+          +++ b/es-core/src/ThemeData.cpp
+          @@ -1892,6 +1892,18 @@ ThemeData::ThemeMenu::ThemeMenu(ThemeData* theme)
+           			Footer.selectorColor = elem->get<unsigned int>("selectorColor");
+           	}
+           
+          +	elem = theme->getElement("menu", "quicksearchinput", "menuTextSmall");
+          +	if (elem)
+          +	{
+          +		if (elem->has("fontPath") || elem->has("fontSize"))
+          +			quickSearchFont = Font::getFromTheme(elem, ThemeFlags::ALL, Font::get(FONT_SIZE_MEDIUM, FONT_PATH_LIGHT));
+          +		if (elem->has("color"))
+          +		{
+          +			quickSearchColor = elem->get<unsigned int>("color");
+          +			hasQuickSearchColor = true;
+          +		}
+          +	}
+          +
+           	elem = theme->getElement("menu", "menutextsmall", "menuTextSmall");
+           	if (elem)
+           	{
+          diff --git a/es-core/src/ThemeData.h b/es-core/src/ThemeData.h
+          index 34d6ae8..ea2589e 100644
+          --- a/es-core/src/ThemeData.h
+          +++ b/es-core/src/ThemeData.h
+          @@ -165,6 +165,10 @@ public:
+           	public:
+           		ThemeMenu(ThemeData* theme);
+           
+          +		std::shared_ptr<Font> quickSearchFont;
+          +		unsigned int quickSearchColor = 0;
+          +		bool hasQuickSearchColor = false;
+          +
+           		MenuBackground Background{ 0xFFFFFFFF, 0xFFFFFFFF, ":/frame.png", ":/scroll_gradient.png", Vector2f(16, 16) };
+           		MenuElement Title{ 0x555555FF, 0x555555FF, 0x555555FF, 0xFFFFFFFF, 0x555555FF, true, "", nullptr };
+           		MenuElement Text{ 0x777777FF, 0xFFFFFFFF, 0x878787FF, 0xC6C7C6FF, 0x878787FF, true, "", nullptr };
+          diff --git a/es-core/src/components/TextEditComponent.cpp b/es-core/src/components/TextEditComponent.cpp
+          index 5166ff6..9a9ca9b 100644
+          --- a/es-core/src/components/TextEditComponent.cpp
+          +++ b/es-core/src/components/TextEditComponent.cpp
+          @@ -13,14 +13,17 @@
+           
+           #define BLINKTIME	1000
+           
+          -TextEditComponent::TextEditComponent(Window* window) : GuiComponent(window),
+          +TextEditComponent::TextEditComponent(Window* window, bool quickSearch) : GuiComponent(window),
+           mBox(window, ":/textinput_ninepatch.png"), mFocused(false),
+          -mScrollOffset(0.0f, 0.0f), mCursor(0), mEditing(false), mFont(Font::get(FONT_SIZE_MEDIUM, FONT_PATH_LIGHT)),
+          +mScrollOffset(0.0f, 0.0f), mCursor(0), mEditing(false), mQuickSearch(quickSearch),
+           mCursorRepeatDir(0)
+           {
+           	mBlinkTime = 0;
+           
+           	auto theme = ThemeData::getMenuTheme();
+          +	mFont = mQuickSearch && theme->quickSearchFont
+          +		? theme->quickSearchFont
+          +		: Font::get(FONT_SIZE_MEDIUM, FONT_PATH_LIGHT);
+           	mBox.setImagePath(ThemeData::getMenuTheme()->Icons.textinput_ninepatch);
+           
+           	addChild(&mBox);
+          @@ -229,10 +232,16 @@ void TextEditComponent::setCursor(size_t pos)
+           	moveCursor(0);
+           }
+           
+          +unsigned int TextEditComponent::getTextColor() const
+          +{
+          +	const auto& theme = ThemeData::getMenuTheme();
+          +	return mQuickSearch && theme->hasQuickSearchColor ? theme->quickSearchColor : theme->Text.color;
+          +}
+          +
+           void TextEditComponent::onTextChanged()
+           {
+           	std::string wrappedText = (isMultiline() ? mFont->wrapText(mText, getTextAreaSize().x()) : mText);
+          -	mTextCache = std::unique_ptr<TextCache>(mFont->buildTextCache(wrappedText, 0, 0, (ThemeData::getMenuTheme()->Text.color & 0xFFFFFF00) | getOpacity()));
+          +	mTextCache = std::unique_ptr<TextCache>(mFont->buildTextCache(wrappedText, 0, 0, (getTextColor() & 0xFFFFFF00) | getOpacity()));
+           
+           	if (mCursor > (int)mText.length())
+           		mCursor = (unsigned int)mText.length();
+          diff --git a/es-core/src/components/TextEditComponent.h b/es-core/src/components/TextEditComponent.h
+          index f3e30fe..5e4e69b 100644
+          --- a/es-core/src/components/TextEditComponent.h
+          +++ b/es-core/src/components/TextEditComponent.h
+          @@ -13,7 +13,7 @@ class TextCache;
+           class TextEditComponent : public GuiComponent
+           {
+           public:
+          -	TextEditComponent(Window* window);
+          +	TextEditComponent(Window* window, bool quickSearch = false);
+           
+           	void textInput(const char* text) override;
+           	bool input(InputConfig* config, Input input) override;
+          @@ -61,6 +61,8 @@ private:
+           
+           	NinePatchComponent mBox;
+           
+          +	unsigned int getTextColor() const;
+          +	bool mQuickSearch;
+           	std::shared_ptr<Font> mFont;
+           	std::unique_ptr<TextCache> mTextCache;
+           
+          diff --git a/es-core/src/guis/GuiInfoPopup.cpp b/es-core/src/guis/GuiInfoPopup.cpp
+          index 3e65a9b..9d18056 100644
+          --- a/es-core/src/guis/GuiInfoPopup.cpp
+          +++ b/es-core/src/guis/GuiInfoPopup.cpp
+          @@ -18,7 +18,7 @@ GuiInfoPopup::GuiInfoPopup(Window* window, std::string message, int duration) :
+           
+           	std::shared_ptr<TextComponent> s = std::make_shared<TextComponent>(mWindow,
+           		"",
+          -		Font::get(FONT_SIZE_MINI),
+          +		Font::get(FONT_SIZE_MINI, theme->Text.font->getPath()),
+           		theme->Text.color, //0x444444FF,
+           		ALIGN_CENTER);
+           
+          diff --git a/es-core/src/guis/GuiTextEditPopupKeyboard.cpp b/es-core/src/guis/GuiTextEditPopupKeyboard.cpp
+          index 305440e..49dc60a 100644
+          --- a/es-core/src/guis/GuiTextEditPopupKeyboard.cpp
+          +++ b/es-core/src/guis/GuiTextEditPopupKeyboard.cpp
+          @@ -99,7 +99,7 @@ std::vector<std::vector<const char*>> kbKr{
+           };
+           
+           GuiTextEditPopupKeyboard::GuiTextEditPopupKeyboard(Window* window, const std::string& title, const std::string& initValue,
+          -	const std::function<void(const std::string&)>& okCallback, bool multiLine, const std::string acceptBtnText)
+          +	const std::function<void(const std::string&)>& okCallback, bool multiLine, const std::string acceptBtnText, bool quickSearch)
+           	: GuiComponent(window), mBackground(window, ":/frame.png"), mGrid(window, Vector2i(1, 6)), mMultiLine(multiLine)
+           {
+           	setTag("popup");
+          @@ -119,7 +119,7 @@ GuiTextEditPopupKeyboard::GuiTextEditPopupKeyboard(Window* window, const std::st
+           	
+           	mKeyboardGrid = std::make_shared<ComponentGrid>(mWindow, Vector2i(kbUs[0].size(), kbUs.size() / BUTTON_LAYER_SIZE));
+           
+          -	mText = std::make_shared<TextEditComponent>(mWindow);
+          +	mText = std::make_shared<TextEditComponent>(mWindow, quickSearch);
+           	mText->setValue(initValue);
+           
+           	if (!multiLine)
+          diff --git a/es-core/src/guis/GuiTextEditPopupKeyboard.h b/es-core/src/guis/GuiTextEditPopupKeyboard.h
+          index 1118d3a..1469a61 100644
+          --- a/es-core/src/guis/GuiTextEditPopupKeyboard.h
+          +++ b/es-core/src/guis/GuiTextEditPopupKeyboard.h
+          @@ -12,7 +12,7 @@ class GuiTextEditPopupKeyboard : public GuiComponent
+           {
+           public:
+           	GuiTextEditPopupKeyboard(Window* window, const std::string& title, const std::string& initValue,
+          -		const std::function<void(const std::string&)>& okCallback, bool multiLine, const std::string acceptBtnText = "OK");
+          +		const std::function<void(const std::string&)>& okCallback, bool multiLine, const std::string acceptBtnText = "OK", bool quickSearch = false);
+           
+           	bool input(InputConfig* config, Input input);
+           	//void update(int deltatime) override;
+          FONT_PATCH
+          git apply --check "$RUNNER_TEMP/fonts.patch"
+          git apply "$RUNNER_TEMP/fonts.patch"
+
+      - name: Install dependencies
+        run: |
+          sudo dpkg --add-architecture arm64
+          sudo sed -i 's/^deb /deb [arch=amd64] /' /etc/apt/sources.list
+          sudo sed -i 's/^deb \[arch=amd64\] http:\/\/archive.ubuntu.com/deb [arch=amd64] http:\/\/archive.ubuntu.com/' /etc/apt/sources.list
+          echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports jammy main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list
+          echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports jammy-updates main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list
+          echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports jammy-security main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list
+          sudo apt-get update -qq
+          sudo apt-get install -y --fix-broken || true
+          # libcurl4 is Multi-Arch: same -> amd64 and arm64 versions must be identical.
+          # The amd64 copy is preinstalled on the runner and cannot be upgraded here,
+          # so pin the arm64 packages to the runner's amd64 version when ports still has it.
+          CURL_AMD64_VER=$(dpkg-query -W -f='${Version}' libcurl4:amd64 2>/dev/null || true)
+          echo "libcurl4 amd64 installed: ${CURL_AMD64_VER:-none}"
+          echo "libcurl4 arm64 available:"
+          apt-cache madison libcurl4:arm64 || true
+          if [ -n "$CURL_AMD64_VER" ] && apt-cache madison libcurl4:arm64 | grep -qF "$CURL_AMD64_VER"; then
+            sudo apt-get install -y libcurl4:arm64="$CURL_AMD64_VER" libcurl4-openssl-dev:arm64="$CURL_AMD64_VER"
+          fi
+          sudo apt-get install -y \
+            gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
+            cmake make pkg-config gettext \
+            libfreeimage-dev:arm64 libvlc-dev:arm64 libvlccore-dev:arm64 \
+            rapidjson-dev \
+            libfreetype-dev:arm64 libsdl2-dev:arm64 libsdl2-mixer-dev:arm64 \
+            libasound2-dev:arm64 libgles-dev:arm64 libgles2-mesa-dev:arm64 \
+            libx11-dev:arm64
+
+      # Fusion des deux étapes Mali dupliquées du workflow d'origine.
+      # On retire d'abord les libs GLES/GL/EGL/Wayland génériques pour éviter
+      # les conflits de symboles avec les libs Mali propriétaires RK.
+      - name: Install Mali RK libs
+        run: |
+          sudo apt-get remove -y \
+            libgles-dev:arm64 libgles2-mesa-dev:arm64 \
+            libgles-dev libgles2-mesa-dev \
+            libegl-dev:arm64 libgl-dev:arm64 \
+            libwayland-dev:arm64 libwayland-egl1:arm64 2>/dev/null || true
+
+          wget -q https://github.com/christianhaitian/EmulationStation-fcamod/raw/351v/libmali-rk-bifrost-g31-rxp0-wayland-gbm_1.7-2+deb10_arm64.deb -O /tmp/libmali.deb
+          wget -q https://github.com/christianhaitian/EmulationStation-fcamod/raw/351v/libmali-rk-dev_1.7-1+deb10_arm64.deb -O /tmp/libmali-dev.deb
+          sudo dpkg -i --force-all /tmp/libmali.deb /tmp/libmali-dev.deb
+
+          # Réinstalle SDL2 au cas où le remove ci-dessus aurait cassé une dépendance
+          sudo apt-get install -y libsdl2-dev:arm64 libsdl2-mixer-dev:arm64 2>/dev/null || true
+
+      - name: Install libgo2 headers
+        run: |
+          sudo mkdir -p /usr/include/go2
+          sudo curl -sL https://raw.githubusercontent.com/christianhaitian/libgo2/master/src/audio.h -o /usr/include/go2/audio.h
+          sudo curl -sL https://raw.githubusercontent.com/christianhaitian/libgo2/master/src/display.h -o /usr/include/go2/display.h
+          sudo curl -sL https://raw.githubusercontent.com/christianhaitian/libgo2/master/src/input.h -o /usr/include/go2/input.h
+
+      - name: Configure (cross-compile aarch64)
+        run: |
+          cmake . \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_STANDARD=17 \
+            -DCMAKE_SYSTEM_NAME=Linux \
+            -DCMAKE_SYSTEM_PROCESSOR=aarch64 \
+            -DCMAKE_C_COMPILER=aarch64-linux-gnu-gcc \
+            -DCMAKE_CXX_COMPILER=aarch64-linux-gnu-g++ \
+            -DCMAKE_CXX_FLAGS="-O3 -march=armv8-a+crc -mtune=cortex-a35 -ffast-math" \
+            -DCMAKE_FIND_ROOT_PATH="/usr/lib/aarch64-linux-gnu;/usr/include/aarch64-linux-gnu" \
+            -DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER \
+            -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY \
+            -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY \
+            -DFREETYPE_INCLUDE_DIRS=/usr/include/freetype2 \
+            -DFREETYPE_LIBRARY=/usr/lib/aarch64-linux-gnu/libfreetype.so \
+            -DX11_X11_INCLUDE_PATH=/usr/include/aarch64-linux-gnu \
+            -DX11_X11_LIB=/usr/lib/aarch64-linux-gnu/libX11.so \
+            -DFreeImage_INCLUDE_DIR=/usr/include \
+            -DFreeImage_LIBRARY_REL=/usr/lib/aarch64-linux-gnu/libfreeimage.so \
+            -DSDL2_INCLUDE_DIR=/usr/include/SDL2 \
+            -DSDL2_LIBRARY=/usr/lib/aarch64-linux-gnu/libSDL2.so \
+            -DSDLMIXER_INCLUDE_DIR=/usr/include/SDL2 \
+            -DSDLMIXER_LIBRARY=/usr/lib/aarch64-linux-gnu/libSDL2_mixer.so \
+            -DVLC_INCLUDE_DIR=/usr/include/vlc \
+            -DVLC_LIBRARY=/usr/lib/aarch64-linux-gnu/libvlc.so \
+            -DALSA_INCLUDE_DIR=/usr/include/aarch64-linux-gnu \
+            -DALSA_LIBRARY=/usr/lib/aarch64-linux-gnu/libasound.so \
+            -DRAPIDJSON_INCLUDE_DIRS=/usr/include \
+            -DOPENGLES_INCLUDE_DIR=/usr/include/GLES2 \
+            -DENABLE_PULSE=OFF \
+            -DGLES=ON \
+            -DGL=OFF \
+            -Wno-dev
+
+      - name: Build and check ARM64 executable
+        run: |
+          make -j2
+          test -x emulationstation
+          readelf -h emulationstation | grep -E 'Machine:.*AArch64'
+          sha256sum emulationstation > emulationstation.sha256
+
+      - name: Upload the rebuilt executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: emulationstation-r36s-fonts
+          path: |
+            emulationstation
+            emulationstation.sha256
+          if-no-files-found: error
